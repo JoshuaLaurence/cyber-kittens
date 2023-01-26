@@ -1,9 +1,12 @@
+require("dotenv").config();
 const express = require("express");
 const app = express();
 const {User, Kitten} = require("./db");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
 
 JWT_SECRET = process.env.JWT_SECRET;
+SALT_COUNT = 10;
 
 app.use(express.json());
 app.use(express.urlencoded({extended: true}));
@@ -27,7 +30,7 @@ app.get("/", async (req, res, next) => {
 
 app.use((req, res, next) => {
 	const auth = req.header("Authorization");
-	if (!auth) res.status(401).send("Unauthorized");
+	if (!auth) next();
 	else {
 		const [, token] = auth.split(" ");
 		try {
@@ -43,22 +46,55 @@ app.use((req, res, next) => {
 
 // POST /register
 // OPTIONAL - takes req.body of {username, password} and creates a new user with the hashed password
+app.post("/register", async (req, res, next) => {
+	try {
+		const {username, password} = req.body;
+		const hashedPassword = await bcrypt.hash(password, SALT_COUNT);
+
+		const {id} = await User.create({
+			username: username,
+			password: hashedPassword,
+		});
+		const token = jwt.sign({id, username}, JWT_SECRET);
+
+		res.status(200).send({message: "success", token: token});
+	} catch (error) {
+		console.log(error);
+		next(error);
+	}
+});
 
 // POST /login
 // OPTIONAL - takes req.body of {username, password}, finds user by username, and compares the password with the hashed version from the DB
+app.post("/login", async (req, res, next) => {
+	try {
+		const {username, password} = req.body;
+		const foundUser = await User.findAll({where: {username: username}});
+
+		const correctPassword = await bcrypt.compare(password, foundUser[0].password);
+		if (!correctPassword) res.status(401).send("Unauthorized");
+		else {
+			const token = jwt.sign(username, JWT_SECRET);
+			res.status(200).send({message: "success", token: token});
+		}
+	} catch (error) {
+		console.log(error);
+		next(error);
+	}
+});
 
 // GET /kittens/:id
 // TODO - takes an id and returns the cat with that id
 app.get("/kittens/:id", async (req, res, next) => {
 	try {
-		const foundKitten = await Kitten.findByPk(req.params.id);
+		if (!req.user) res.status(401).send("Unauthorized");
+		const [foundKitten] = await Kitten.findAll({
+			where: {id: req.params.id},
+			include: User,
+			attributes: ["id", "name", "color", "age", "ownerId"],
+		});
 		if (foundKitten.ownerId !== req.user.id) res.sendStatus(401);
-		else
-			res.status(200).send({
-				name: foundKitten.name,
-				age: foundKitten.age,
-				color: foundKitten.color,
-			});
+		else res.status(200).send(foundKitten);
 	} catch (error) {
 		console.log(error);
 		next(error);
@@ -69,6 +105,7 @@ app.get("/kittens/:id", async (req, res, next) => {
 // TODO - takes req.body of {name, age, color} and creates a new cat with the given name, age, and color
 app.post("/kittens", async (req, res, next) => {
 	try {
+		if (!req.user) res.status(401).send("Unauthorized");
 		const {name, age, color} = req.body;
 		const newKitten = await Kitten.create({
 			name,
@@ -78,7 +115,12 @@ app.post("/kittens", async (req, res, next) => {
 		});
 		res
 			.status(201)
-			.send({name: newKitten.name, age: newKitten.age, color: newKitten.color});
+			.send({
+				name: newKitten.name,
+				age: newKitten.age,
+				color: newKitten.color,
+				id: newKitten.id,
+			});
 	} catch (error) {
 		console.log(error);
 		next(error);
@@ -89,6 +131,7 @@ app.post("/kittens", async (req, res, next) => {
 // TODO - takes an id and deletes the cat with that id
 app.delete("/kittens/:id", async (req, res, next) => {
 	try {
+		if (!req.user) res.status(401).send("Unauthorized");
 		const foundKitten = await Kitten.findByPk(req.params.id);
 		if (foundKitten.ownerId !== req.user.id) res.sendStatus(401);
 		else {
